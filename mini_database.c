@@ -12,6 +12,29 @@ typedef struct
 	ssize_t input_length;
 } InputBuffer;
 
+typedef enum
+{
+	META_COMMAND_SUCCESS,
+	META_COMMAND_UNRECOGNIZED_COMMAND
+} MetaCommandResult;
+
+typedef enum
+{
+	PREPARE_SUCCESS,
+	PREPARE_UNRECOGNIZED_STATEMENT
+} PrepareResult;
+
+typedef enum
+{
+	STATEMENT_INSERT,
+	STATEMENT_SELECT
+} StatementType;
+
+typedef struct
+{
+	StatementType type;
+} Statement;
+
 InputBuffer *new_input_buffer(void)
 {
 	InputBuffer *input_buffer = malloc(sizeof(InputBuffer));
@@ -48,15 +71,58 @@ void read_input(InputBuffer *input_buffer)
 	}
 	else
 	{
-		// Last line had no newline (e.g. piped input ending at EOF)
 		input_buffer->input_length = bytes_read;
 	}
 }
 
 void close_input_buffer(InputBuffer *input_buffer)
 {
-	free(input_buffer->buffer); // inner allocation first
-	free(input_buffer);			// then the container
+	free(input_buffer->buffer);
+	free(input_buffer);
+}
+
+MetaCommandResult do_meta_command(InputBuffer *input_buffer)
+{
+	if (strcmp(input_buffer->buffer, ".exit") == 0)
+	{
+		close_input_buffer(input_buffer);
+		exit(EXIT_SUCCESS);
+	}
+	else
+	{
+		return META_COMMAND_UNRECOGNIZED_COMMAND;
+	}
+}
+
+PrepareResult prepare_statement(InputBuffer *input_buffer, Statement *statement)
+{
+	// TODO: once insert takes arguments, check the char after "insert"
+	// is a space or '\0' so "insertxyz" is rejected.
+	if (strncmp(input_buffer->buffer, "insert", 6) == 0)
+	{
+		statement->type = STATEMENT_INSERT;
+		return PREPARE_SUCCESS;
+	}
+	if (strcmp(input_buffer->buffer, "select") == 0)
+	{
+		statement->type = STATEMENT_SELECT;
+		return PREPARE_SUCCESS;
+	}
+
+	return PREPARE_UNRECOGNIZED_STATEMENT;
+}
+
+void execute_statement(Statement *statement)
+{
+	switch (statement->type)
+	{
+	case STATEMENT_INSERT:
+		printf("This is where we should do an insert.\n");
+		break;
+	case STATEMENT_SELECT:
+		printf("This is where we should do a select.\n");
+		break;
+	}
 }
 
 int main(void)
@@ -67,14 +133,32 @@ int main(void)
 		print_prompt();
 		read_input(input_buffer);
 
-		if (strcmp(input_buffer->buffer, ".exit") == 0)
+		/* Handle meta commands */
+		if (input_buffer->buffer[0] == '.')
 		{
-			close_input_buffer(input_buffer);
-			exit(EXIT_SUCCESS);
+			switch (do_meta_command(input_buffer))
+			{
+			case META_COMMAND_SUCCESS:
+				continue;
+			case META_COMMAND_UNRECOGNIZED_COMMAND:
+				printf("Unrecognized command '%s'.\n", input_buffer->buffer);
+				continue;
+			}
 		}
-		else
+
+		/* Handle SQL statements */
+		Statement statement;
+		switch (prepare_statement(input_buffer, &statement))
 		{
-			printf("Unrecognized command '%s'.\n", input_buffer->buffer);
+		case PREPARE_SUCCESS:
+			break;
+		case PREPARE_UNRECOGNIZED_STATEMENT:
+			printf("Unrecognized keyword at start of '%s'.\n",
+				   input_buffer->buffer);
+			continue;
 		}
+
+		execute_statement(&statement);
+		printf("Executed.\n");
 	}
 }
