@@ -1,0 +1,3 @@
+insert 1 alice
+select
+.exit
