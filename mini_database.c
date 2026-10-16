@@ -98,14 +98,19 @@ void deserialize_row(void *source, Row *destination)
 void *row_slot(Table *table, uint32_t row_num)
 {
 	uint32_t page_num = row_num / ROWS_PER_PAGE;
-	void *page = table->pages[page_num];
+	char *page = table->pages[page_num]; // char * so the arithmetic below is standard C
 	if (page == NULL)
 	{
 		page = table->pages[page_num] = malloc(PAGE_SIZE);
+		if (page == NULL)
+		{
+			printf("Out of memory\n");
+			exit(EXIT_FAILURE);
+		}
 	}
 
-	uint32_t row_offset = row_num % ROWS_PER_PAGE;
-	uint32_t byte_offset = row_offset * ROW_SIZE;
+	uint32_t slot_index = row_num % ROWS_PER_PAGE; // renamed: it's a row index, not bytes
+	uint32_t byte_offset = slot_index * ROW_SIZE;
 	return page + byte_offset;
 }
 
