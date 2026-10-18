@@ -77,7 +77,7 @@ const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 typedef struct
 {
 	int file_descriptor;
-	uint32_t file_lenght;
+	uint32_t file_length;
 	void *pages[TABLE_MAX_PAGES];
 
 } Pager;
@@ -89,23 +89,16 @@ typedef struct
 
 } Table;
 
+typedef struct
+{
+	Table *table;
+	uint32_t row_num;
+	bool end_of_table; // indicates a positoin one past the last element
+} Cursor;
+
 void print_row(Row *row)
 {
 	printf("(%u, %s, %s)\n", row->id, row->username, row->email);
-}
-
-void serialize_row(Row *source, void *destination)
-{
-	memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
-	strncpy(destination + USERNAME_OFFSET, source->username, USERNAME_SIZE);
-	strncpy(destination + EMAIL_OFFSET, source->email, EMAIL_SIZE);
-}
-
-void deserialize_row(void *source, Row *destination)
-{
-	memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
-	memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
-	memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
 }
 
 void *get_page(Pager *pager, uint32_t page_num)
@@ -121,10 +114,10 @@ void *get_page(Pager *pager, uint32_t page_num)
 
 		// Cache miss . Allocate memory and load from file
 		void *page = malloc(PAGE_SIZE);
-		uint32_t num_pages = pager->file_lenght / PAGE_SIZE;
+		uint32_t num_pages = pager->file_length / PAGE_SIZE;
 
 		// we might save a partial page at the end of the file
-		if (pager->file_lenght % PAGE_SIZE)
+		if (pager->file_length % PAGE_SIZE)
 		{
 			num_pages += 1;
 		}
@@ -147,6 +140,20 @@ void *get_page(Pager *pager, uint32_t page_num)
 	return pager->pages[page_num];
 }
 
+void serialize_row(Row *source, void *destination)
+{
+	memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
+	// strncpy zero-fills the remainder, so no uninitialized bytes leak to disk
+	strncpy(destination + USERNAME_OFFSET, source->username, USERNAME_SIZE);
+	strncpy(destination + EMAIL_OFFSET, source->email, EMAIL_SIZE);
+}
+void deserialize_row(void *source, Row *destination)
+{
+	memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
+	memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
+	memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
+}
+
 Pager *pager_open(const char *filename)
 {
 	int fd = open(filename, O_RDWR | O_CREAT, S_IWUSR | S_IRUSR);
@@ -157,11 +164,11 @@ Pager *pager_open(const char *filename)
 		exit(EXIT_FAILURE);
 	}
 
-	off_t file_lenght = lseek(fd, 0, SEEK_END);
+	off_t file_length = lseek(fd, 0, SEEK_END);
 
 	Pager *pager = malloc(sizeof(Pager));
 	pager->file_descriptor = fd;
-	pager->file_lenght = file_lenght;
+	pager->file_length = file_length;
 
 	for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++)
 	{
@@ -169,6 +176,84 @@ Pager *pager_open(const char *filename)
 	}
 
 	return pager;
+}
+
+Cursor *table_start(Table *table)
+{
+	Cursor *cursor = malloc(sizeof(Cursor));
+	cursor->table = table;
+	cursor->row_num = 0;
+	cursor->end_of_table = (table->num_rows == 0);
+
+	return cursor;
+}
+Cursor *table_end(Table *table)
+{
+	Cursor *cursor = malloc(sizeof(Cursor));
+
+	cursor->table = table;
+	cursor->row_num = table->num_rows;
+	cursor->end_of_table = true;
+
+	return cursor;
+}
+
+Table *db_open(const char *filename)
+{
+	Pager *pager = pager_open(filename);
+	uint32_t num_rows = pager->file_length / ROW_SIZE;
+
+	Table *table = malloc(sizeof(Table));
+	table->pager = pager;
+	table->num_rows = num_rows;
+
+	return table;
+}
+
+InputBuffer *new_input_buffer(void)
+{
+	InputBuffer *input_buffer = (InputBuffer *)malloc(sizeof(InputBuffer));
+	if (input_buffer == NULL)
+	{
+		printf("Out of memory\n");
+		exit(EXIT_FAILURE);
+	}
+	input_buffer->buffer = NULL;
+	input_buffer->buffer_length = 0;
+	input_buffer->input_length = 0;
+
+	return input_buffer;
+}
+
+void print_prompt(void) { printf("db > "); }
+
+void read_input(InputBuffer *input_buffer)
+{
+	ssize_t bytes_read =
+		getline(&(input_buffer->buffer), &(input_buffer->buffer_length), stdin);
+
+	if (bytes_read <= 0)
+	{
+		printf("Error reading input\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (input_buffer->buffer[bytes_read - 1] == '\n')
+	{
+		// Ignore trailing newline
+		input_buffer->input_length = bytes_read - 1;
+		input_buffer->buffer[bytes_read - 1] = 0;
+	}
+	else
+	{
+		input_buffer->input_length = bytes_read;
+	}
+}
+
+void close_input_buffer(InputBuffer *input_buffer)
+{
+	free(input_buffer->buffer);
+	free(input_buffer);
 }
 
 void pager_flush(Pager *pager, uint32_t page_num, uint32_t size)
@@ -194,28 +279,6 @@ void pager_flush(Pager *pager, uint32_t page_num, uint32_t size)
 		printf("Error writing: %d\n", errno);
 		exit(EXIT_FAILURE);
 	}
-}
-
-void *row_slot(Table *table, uint32_t row_num)
-{
-	uint32_t page_num = row_num / ROWS_PER_PAGE;
-	void *page = get_page(table->pager, page_num);
-
-	uint32_t slot_index = row_num % ROWS_PER_PAGE; // renamed: it's a row index, not bytes
-	uint32_t byte_offset = slot_index * ROW_SIZE;
-	return page + byte_offset;
-}
-
-Table *db_open(const char *filename)
-{
-	Pager *pager = pager_open(filename);
-	uint32_t num_rows = pager->file_lenght / ROW_SIZE;
-
-	Table *table = malloc(sizeof(Table));
-	table->pager = pager;
-	table->num_rows = num_rows;
-
-	return table;
 }
 
 void db_close(Table *table)
@@ -271,50 +334,25 @@ void db_close(Table *table)
 	free(table);
 }
 
-InputBuffer *new_input_buffer(void)
+void *cursor_value(Cursor *cursor)
 {
-	InputBuffer *input_buffer = (InputBuffer *)malloc(sizeof(InputBuffer));
-	if (input_buffer == NULL)
-	{
-		printf("Out of memory\n");
-		exit(EXIT_FAILURE);
-	}
-	input_buffer->buffer = NULL;
-	input_buffer->buffer_length = 0;
-	input_buffer->input_length = 0;
+	uint32_t row_num = cursor->row_num;
+	uint32_t page_num = row_num / ROWS_PER_PAGE;
+	void *page = get_page(cursor->table->pager, page_num);
 
-	return input_buffer;
+	uint32_t slot_index = row_num % ROWS_PER_PAGE; // renamed: it's a row index, not bytes
+	uint32_t byte_offset = slot_index * ROW_SIZE;
+	return page + byte_offset;
 }
 
-void print_prompt(void) { printf("db > "); }
-
-void read_input(InputBuffer *input_buffer)
+void cursor_advance(Cursor *cursor)
 {
-	ssize_t bytes_read =
-		getline(&(input_buffer->buffer), &(input_buffer->buffer_length), stdin);
+	cursor->row_num += 1;
 
-	if (bytes_read <= 0)
+	if (cursor->row_num >= cursor->table->num_rows)
 	{
-		printf("Error reading input\n");
-		exit(EXIT_FAILURE);
+		cursor->end_of_table = true;
 	}
-
-	if (input_buffer->buffer[bytes_read - 1] == '\n')
-	{
-		// Ignore trailing newline
-		input_buffer->input_length = bytes_read - 1;
-		input_buffer->buffer[bytes_read - 1] = 0;
-	}
-	else
-	{
-		input_buffer->input_length = bytes_read;
-	}
-}
-
-void close_input_buffer(InputBuffer *input_buffer)
-{
-	free(input_buffer->buffer);
-	free(input_buffer);
 }
 
 MetaCommandResult do_meta_command(InputBuffer *input_buffer, Table *table)
@@ -394,23 +432,32 @@ ExecuteResult execute_insert(Statement *statement, Table *table)
 	}
 
 	Row *row_to_insert = &(statement->row_to_insert);
+	Cursor *cursor = table_end(table);
 
-	serialize_row(row_to_insert, row_slot(table, table->num_rows));
+	serialize_row(row_to_insert, cursor_value(cursor));
 	table->num_rows += 1;
+
+	free(cursor);
 
 	return EXECUTE_SUCCESS;
 }
 
 ExecuteResult execute_select(Statement *statement, Table *table)
 {
+
+	Cursor *cursor = table_start(table);
+
 	(void)statement;
 	Row row;
 
-	for (uint32_t i = 0; i < table->num_rows; i++)
+	while (!(cursor->end_of_table))
 	{
-		deserialize_row(row_slot(table, i), &row);
+		deserialize_row(cursor_value(cursor), &row);
 		print_row(&row);
+		cursor_advance(cursor);
 	}
+
+	free(cursor);
 	return EXECUTE_SUCCESS;
 }
 
