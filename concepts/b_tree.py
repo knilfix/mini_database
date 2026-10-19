@@ -1,6 +1,3 @@
-import random
-
-
 class BTreeNode:
     def __init__(self, min_degree, is_leaf) -> None:
         self.min_degree = min_degree
@@ -18,7 +15,7 @@ class BTreeNode:
 
         if index < self.num_keys and key == self.keys[index]:
             return self, index
-
+            
         if self.is_leaf:
             return None, None
 
@@ -150,13 +147,13 @@ def show(node, depth=0):
 
 
 def main():
-    b_tree = Btree(2)  # max 3 keys per node
-    keys = [10, 20, 30, 40, 50, 25, 5, 35, 45, 60, 55]
+    b_tree = Btree(2)
+    keys = [10, 20, 30, 40, 50, 25, 5, 35, 45, 60, 55,65]
 
     for key in keys:
-        print(f"--- insert {key}")
         b_tree.insert(key)
-        show(b_tree.root)
+
+    show(b_tree.root)
 
 
 if __name__ == "__main__":
