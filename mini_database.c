@@ -34,17 +34,33 @@ typedef enum {
 typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
 
 /* CONSTANTS */
+
 #define COLUMN_USERNAME_SIZE 32
 #define COLUMN_EMAIL_SIZE 255
+#define PAGE_SIZE 4096u
+#define TABLE_MAX_PAGES 100
 
 #define COLUMN_NAME_SIZE 32
 #define MAX_COLUMNS 10
+#define DB_MAGIC                                                               \
+  0x4D494E49u // "MINI" — a file that doesn't start with this is not ours
+#define DB_VERSION 1u
 
 typedef struct {
   uint32_t offset;             // byte offset within a row
   uint32_t size;               // byte width of this column
   char name[COLUMN_NAME_SIZE]; // e.g "id", "username"
 } Column;
+
+typedef struct {
+  uint32_t magic;
+  uint32_t version;
+  uint32_t num_rows;
+  uint32_t num_columns;
+  Column columns[MAX_COLUMNS];
+} Header;
+
+_Static_assert(sizeof(Header) <= PAGE_SIZE, "Header must fit in one page");
 
 typedef struct {
   uint32_t num_columns;
@@ -65,9 +81,6 @@ typedef struct {
 } Statement;
 
 #define size_of_attribute(Struct, Attribute) sizeof(((Struct *)0)->Attribute)
-
-const uint32_t PAGE_SIZE = 4096;
-#define TABLE_MAX_PAGES 100
 
 typedef struct {
   int file_descriptor;
@@ -113,7 +126,8 @@ void *get_page(Pager *pager, uint32_t page_num) {
   if (pager->pages[page_num] == NULL) {
 
     // Cache miss . Allocate memory and load from file
-    void *page = malloc(PAGE_SIZE);
+    void *page =
+        calloc(PAGE_SIZE, 1); // allocates memory and initialize the page
     uint32_t num_pages = pager->file_length / PAGE_SIZE;
 
     // we might save a partial page at the end of the file
