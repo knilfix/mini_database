@@ -364,7 +364,6 @@ void db_close(Table *table) {
     if (pager->pages[i] == NULL) {
       continue;
     }
-
     pager_flush(pager, i, PAGE_SIZE);
     free(pager->pages[i]);
     pager->pages[i] = NULL;
@@ -479,7 +478,7 @@ PrepareResult prepare_statement(InputBuffer *input_buffer,
 }
 
 ExecuteResult execute_insert(Schema *s, Statement *statement, Table *table) {
-  uint32_t table_max_rows = s->rows_per_page * TABLE_MAX_PAGES;
+  uint32_t table_max_rows = s->rows_per_page * (TABLE_MAX_PAGES - 1);
   if (table->num_rows >= table_max_rows) {
     return EXECUTE_TABLE_FULL;
   }
@@ -489,25 +488,19 @@ ExecuteResult execute_insert(Schema *s, Statement *statement, Table *table) {
 
   serialize_row(s, row_to_insert, cursor_value(cursor));
   table->num_rows += 1;
-
   free(cursor);
-
   return EXECUTE_SUCCESS;
 }
 
 ExecuteResult execute_select(Schema *s, Statement *statement, Table *table) {
-
   Cursor *cursor = table_start(table);
-
   (void)statement;
   Row row;
-
   while (!(cursor->end_of_table)) {
     deserialize_row(s, cursor_value(cursor), &row);
     print_row(&row);
     cursor_advance(cursor);
   }
-
   free(cursor);
   return EXECUTE_SUCCESS;
 }
