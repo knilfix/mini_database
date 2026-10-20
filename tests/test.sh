@@ -128,6 +128,31 @@ select
 .exit
 EOF
 
+
+# ---- 8. persistence at page boundaries ----
+# rows_per_page = PAGE_SIZE / ROW_SIZE = 4096 / 293 = 13
+for n in 12 13 14; do
+  DB="$TMPDIR/boundary_$n.db"
+  rm -f "$DB"
+
+  # insert n rows, exit
+  { for i in $(seq 1 "$n"); do
+      echo "insert $i u$i e$i@x.com"
+    done
+    echo .exit
+  } | "$BIN" "$DB" > /dev/null 2>&1
+
+  # reopen, select, count rows (row 1 shares a line with the prompt, so
+  # match the "(<digits>, " pattern anywhere on the line, not just ^\( )
+  count=$(printf 'select\n.exit\n' | "$BIN" "$DB" 2>&1 | grep -cE '\([0-9]+, ')
+  if [ "$count" -eq "$n" ]; then
+    echo "PASS  persistence: $n rows across page boundary"
+  else
+    echo "FAIL  persistence: $n rows across page boundary (got $count)"
+    fails=$((fails + 1))
+  fi
+done
+
 # ---- summary ----
 echo
 if [ "$fails" -eq 0 ]; then

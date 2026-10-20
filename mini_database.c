@@ -66,18 +66,8 @@ typedef struct {
 
 #define size_of_attribute(Struct, Attribute) sizeof(((Struct *)0)->Attribute)
 
-const uint32_t ID_SIZE = size_of_attribute(Row, id);
-const uint32_t USERNAME_SIZE = size_of_attribute(Row, username);
-const uint32_t EMAIL_SIZE = size_of_attribute(Row, email);
-const uint32_t ID_OFFSET = 0;
-const uint32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
-const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
-const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-
 const uint32_t PAGE_SIZE = 4096;
 #define TABLE_MAX_PAGES 100
-const uint32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
-const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
 typedef struct {
   int file_descriptor;
@@ -221,16 +211,17 @@ Cursor *table_end(Table *table) {
 
   return cursor;
 }
-
 Table *db_open(const char *filename) {
   Pager *pager = pager_open(filename);
-  uint32_t num_rows = pager->file_length / ROW_SIZE;
 
   Table *table = malloc(sizeof(Table));
   table->schema = default_schema();
-  assert(table->schema.row_size == ROW_SIZE);
   table->pager = pager;
-  table->num_rows = num_rows;
+  table->num_rows = pager->file_length / table->schema.row_size;
+
+  assert(table->schema.row_size == size_of_attribute(Row, id) +
+                                       size_of_attribute(Row, username) +
+                                       size_of_attribute(Row, email));
 
   return table;
 }
@@ -297,7 +288,9 @@ void pager_flush(Pager *pager, uint32_t page_num, uint32_t size) {
 
 void db_close(Table *table) {
   Pager *pager = table->pager;
-  uint32_t num_full_pages = table->num_rows / ROWS_PER_PAGE;
+  Schema *s = &table->schema;
+
+  uint32_t num_full_pages = table->num_rows / s->rows_per_page;
 
   for (uint32_t i = 0; i < num_full_pages; i++) {
     if (pager->pages[i] == NULL) {
@@ -312,11 +305,11 @@ void db_close(Table *table) {
   }
 
   // If partial page to write to the end of file
-  uint32_t num_of_additional_rows = table->num_rows % ROWS_PER_PAGE;
+  uint32_t num_of_additional_rows = table->num_rows % s->rows_per_page;
   if (num_of_additional_rows > 0) {
     uint32_t page_num = num_full_pages;
     if (pager->pages[page_num] != NULL) {
-      pager_flush(pager, page_num, num_of_additional_rows * ROW_SIZE);
+      pager_flush(pager, page_num, num_of_additional_rows * s->row_size);
       free(pager->pages[page_num]);
       pager->pages[page_num] = NULL;
     }
@@ -341,13 +334,13 @@ void db_close(Table *table) {
 }
 
 void *cursor_value(Cursor *cursor) {
+  Schema *s = &cursor->table->schema;
   uint32_t row_num = cursor->row_num;
-  uint32_t page_num = row_num / ROWS_PER_PAGE;
+  uint32_t page_num = row_num / s->rows_per_page;
   void *page = get_page(cursor->table->pager, page_num);
 
-  uint32_t slot_index =
-      row_num % ROWS_PER_PAGE; // renamed: it's a row index, not bytes
-  uint32_t byte_offset = slot_index * ROW_SIZE;
+  uint32_t slot_index = row_num % s->rows_per_page;
+  uint32_t byte_offset = slot_index * s->row_size;
   return page + byte_offset;
 }
 
@@ -418,7 +411,8 @@ PrepareResult prepare_statement(InputBuffer *input_buffer,
 }
 
 ExecuteResult execute_insert(Schema *s, Statement *statement, Table *table) {
-  if (table->num_rows >= TABLE_MAX_ROWS) {
+  uint32_t table_max_rows = s->rows_per_page * TABLE_MAX_PAGES;
+  if (table->num_rows >= table_max_rows) {
     return EXECUTE_TABLE_FULL;
   }
 
