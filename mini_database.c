@@ -225,17 +225,77 @@ Cursor *table_end(Table *table) {
 
   return cursor;
 }
+
+void pager_flush(Pager *pager, uint32_t page_num, uint32_t size) {
+  if (pager->pages[page_num] == NULL) {
+    printf("Tried to flush a null page.\n");
+    exit(EXIT_FAILURE);
+  }
+
+  off_t offset = lseek(pager->file_descriptor, page_num * PAGE_SIZE, SEEK_SET);
+
+  if (offset == -1) {
+    printf("Error seeking %d\n", errno);
+    exit(EXIT_FAILURE);
+  }
+
+  ssize_t bytes_written =
+      write(pager->file_descriptor, pager->pages[page_num], size);
+
+  if (bytes_written == -1) {
+    printf("Error writing: %d\n", errno);
+    exit(EXIT_FAILURE);
+  }
+}
+
 Table *db_open(const char *filename) {
   Pager *pager = pager_open(filename);
 
   Table *table = malloc(sizeof(Table));
-  table->schema = default_schema();
   table->pager = pager;
-  table->num_rows = pager->file_length / table->schema.row_size;
 
-  assert(table->schema.row_size == size_of_attribute(Row, id) +
-                                       size_of_attribute(Row, username) +
-                                       size_of_attribute(Row, email));
+  // On New file, write the header
+  if (pager->file_length == 0) {
+    table->schema = default_schema();
+    table->num_rows = 0;
+
+    // Header initialization
+    Header h = {0};
+    h.magic = DB_MAGIC;
+    h.version = DB_VERSION;
+    h.num_rows = 0;
+    h.num_columns = table->schema.num_columns;
+    memcpy(h.columns, table->schema.columns, sizeof(h.columns));
+
+    void *page0 = get_page(pager, 0);
+    memcpy(page0, &h, sizeof(h));
+    pager_flush(pager, 0, PAGE_SIZE);
+  } else {
+    // Read and validate the header
+    void *page0 = get_page(pager, 0);
+    Header h;
+    memcpy(&h, page0, sizeof(h));
+
+    if (h.magic != DB_MAGIC) {
+      printf("Not a mini_database file (or created by older versions)\n");
+      exit(EXIT_FAILURE);
+    }
+
+    if (h.version != DB_VERSION) {
+      printf("Unsupported database version %u.\n", h.version);
+      exit(EXIT_FAILURE);
+    }
+
+    // Schema values calculations
+    table->schema.num_columns = h.num_columns;
+    table->schema.row_size = 0;
+    for (uint32_t i = 0; i < h.num_columns; i++) {
+      table->schema.columns[i] = h.columns[i];
+      table->schema.row_size += h.columns[i].size;
+    }
+    table->schema.rows_per_page = PAGE_SIZE / table->schema.row_size;
+    table->num_rows = h.num_rows;
+  }
 
   return table;
 }
@@ -278,50 +338,42 @@ void close_input_buffer(InputBuffer *input_buffer) {
   free(input_buffer);
 }
 
-void pager_flush(Pager *pager, uint32_t page_num, uint32_t size) {
-  if (pager->pages[page_num] == NULL) {
-    printf("Tried to flush a null page.\n");
-    exit(EXIT_FAILURE);
-  }
-
-  off_t offset = lseek(pager->file_descriptor, page_num * PAGE_SIZE, SEEK_SET);
-
-  if (offset == -1) {
-    printf("Error seeking %d\n", errno);
-    exit(EXIT_FAILURE);
-  }
-
-  ssize_t bytes_written =
-      write(pager->file_descriptor, pager->pages[page_num], size);
-
-  if (bytes_written == -1) {
-    printf("Error writing: %d\n", errno);
-    exit(EXIT_FAILURE);
-  }
-}
-
 void db_close(Table *table) {
   Pager *pager = table->pager;
   Schema *s = &table->schema;
 
+  // 1.Flush the Header page first
+  // 1. Update the header's num_rows in the cached page 0, then flush it.
+  if (pager->pages[0] != NULL) {
+    Header h = {0};
+    h.magic = DB_MAGIC;
+    h.version = DB_VERSION;
+    h.num_rows = table->num_rows;
+    h.num_columns = s->num_columns;
+    memcpy(h.columns, s->columns, sizeof(h.columns));
+    memcpy(pager->pages[0], &h, sizeof(h));
+
+    pager_flush(pager, 0, PAGE_SIZE);
+    free(pager->pages[0]);
+    pager->pages[0] = NULL;
+  }
+
+  // 2.Flush full row pages. Row pages start at 1
   uint32_t num_full_pages = table->num_rows / s->rows_per_page;
-
-  for (uint32_t i = 0; i < num_full_pages; i++) {
+  for (uint32_t i = 1; i <= num_full_pages; i++) {
     if (pager->pages[i] == NULL) {
-
       continue;
     }
 
     pager_flush(pager, i, PAGE_SIZE);
     free(pager->pages[i]);
-
     pager->pages[i] = NULL;
   }
 
-  // If partial page to write to the end of file
+  // 3.Flush the tail page (partial last page), which lives at 1 + num_full_page
   uint32_t num_of_additional_rows = table->num_rows % s->rows_per_page;
   if (num_of_additional_rows > 0) {
-    uint32_t page_num = num_full_pages;
+    uint32_t page_num = 1 + num_full_pages;
     if (pager->pages[page_num] != NULL) {
       pager_flush(pager, page_num, num_of_additional_rows * s->row_size);
       free(pager->pages[page_num]);
@@ -329,13 +381,14 @@ void db_close(Table *table) {
     }
   }
 
+  // 4. Close fd.
   int result = close(pager->file_descriptor);
   if (result == -1) {
-
     printf("Error closing db file.\n");
     exit(EXIT_FAILURE);
   }
 
+  // 5. Free any still-cached pages (e.g pages read but never written)
   for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
     void *page = pager->pages[i];
     if (page) {
@@ -350,7 +403,8 @@ void db_close(Table *table) {
 void *cursor_value(Cursor *cursor) {
   Schema *s = &cursor->table->schema;
   uint32_t row_num = cursor->row_num;
-  uint32_t page_num = row_num / s->rows_per_page;
+  uint32_t page_num =
+      1 + row_num / s->rows_per_page; // to account for header page
   void *page = get_page(cursor->table->pager, page_num);
 
   uint32_t slot_index = row_num % s->rows_per_page;
