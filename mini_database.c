@@ -95,7 +95,7 @@ typedef struct {
 typedef struct {
   Table *table;
   uint32_t row_num;
-  bool end_of_table; // indicates a positoin one past the last element
+  bool end_of_table; // indicates a position one past the last element
 } Cursor;
 
 static Schema default_schema(void) {
@@ -147,16 +147,40 @@ void *get_page(Pager *pager, uint32_t page_num) {
   return pager->pages[page_num];
 }
 
-void serialize_row(Row *source, void *destination) {
-  memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
-  // strncpy zero-fills the remainder, so no uninitialized bytes leak to disk
-  strncpy(destination + USERNAME_OFFSET, source->username, USERNAME_SIZE);
-  strncpy(destination + EMAIL_OFFSET, source->email, EMAIL_SIZE);
+void serialize_row(Schema *s, Row *src, void *dst) {
+  for (uint32_t i = 0; i < s->num_columns; i++) {
+    Column *col = &s->columns[i];
+    char *base = (char *)dst + col->offset;
+    switch (i) {
+    case 0:
+      memcpy(base, &src->id, col->size);
+      break;
+    case 1:
+      strncpy(base, src->username, col->size);
+      break;
+    case 2:
+      strncpy(base, src->email, col->size);
+      break;
+    }
+  }
 }
-void deserialize_row(void *source, Row *destination) {
-  memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
-  memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
-  memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
+
+void deserialize_row(Schema *s, void *src, Row *dst) {
+  for (uint32_t i = 0; i < s->num_columns; i++) {
+    Column *col = &s->columns[i];
+    char *base = (char *)src + col->offset;
+    switch (i) {
+    case 0:
+      memcpy(&dst->id, base, col->size);
+      break;
+    case 1:
+      memcpy(dst->username, base, col->size);
+      break;
+    case 2:
+      memcpy(dst->email, base, col->size);
+      break;
+    }
+  }
 }
 
 Pager *pager_open(const char *filename) {
@@ -393,7 +417,7 @@ PrepareResult prepare_statement(InputBuffer *input_buffer,
   return PREPARE_UNRECOGNIZED_STATEMENT;
 }
 
-ExecuteResult execute_insert(Statement *statement, Table *table) {
+ExecuteResult execute_insert(Schema *s, Statement *statement, Table *table) {
   if (table->num_rows >= TABLE_MAX_ROWS) {
     return EXECUTE_TABLE_FULL;
   }
@@ -401,7 +425,7 @@ ExecuteResult execute_insert(Statement *statement, Table *table) {
   Row *row_to_insert = &(statement->row_to_insert);
   Cursor *cursor = table_end(table);
 
-  serialize_row(row_to_insert, cursor_value(cursor));
+  serialize_row(s, row_to_insert, cursor_value(cursor));
   table->num_rows += 1;
 
   free(cursor);
@@ -409,7 +433,7 @@ ExecuteResult execute_insert(Statement *statement, Table *table) {
   return EXECUTE_SUCCESS;
 }
 
-ExecuteResult execute_select(Statement *statement, Table *table) {
+ExecuteResult execute_select(Schema *s, Statement *statement, Table *table) {
 
   Cursor *cursor = table_start(table);
 
@@ -417,7 +441,7 @@ ExecuteResult execute_select(Statement *statement, Table *table) {
   Row row;
 
   while (!(cursor->end_of_table)) {
-    deserialize_row(cursor_value(cursor), &row);
+    deserialize_row(s, cursor_value(cursor), &row);
     print_row(&row);
     cursor_advance(cursor);
   }
@@ -426,13 +450,13 @@ ExecuteResult execute_select(Statement *statement, Table *table) {
   return EXECUTE_SUCCESS;
 }
 
-ExecuteResult execute_statement(Statement *statement, Table *table) {
+ExecuteResult execute_statement(Schema *s, Statement *statement, Table *table) {
   switch (statement->type) {
   case STATEMENT_INSERT:
-    return execute_insert(statement, table);
+    return execute_insert(s, statement, table);
 
   case STATEMENT_SELECT:
-    return execute_select(statement, table);
+    return execute_select(s, statement, table);
   }
   return EXECUTE_SUCCESS;
 }
@@ -484,7 +508,7 @@ int main(int argc, char *argv[]) {
       continue;
     }
 
-    switch (execute_statement(&statement, table)) {
+    switch (execute_statement(&table->schema, &statement, table)) {
     case (EXECUTE_SUCCESS):
       printf("Executed.\n");
       break;
