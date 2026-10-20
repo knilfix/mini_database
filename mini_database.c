@@ -35,6 +35,23 @@ typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
 /* CONSTANTS */
 #define COLUMN_USERNAME_SIZE 32
 #define COLUMN_EMAIL_SIZE 255
+
+#define COLUMN_NAME_SIZE 32
+#define MAX_COLUMNS 10
+
+typedef struct {
+  uint32_t offset;             // byte offset within a row
+  uint32_t size;               // byte width of this column
+  char name[COLUMN_NAME_SIZE]; // e.g "id", "username"
+} Column;
+
+typedef struct {
+  uint32_t num_columns;
+  uint32_t row_size;      // sum of column sizes
+  uint32_t rows_per_page; // PAGE_SIZE / row_size (computed at open)
+  Column columns[MAX_COLUMNS];
+} Schema;
+
 typedef struct {
   uint32_t id;
   char username[COLUMN_USERNAME_SIZE + 1];
@@ -71,7 +88,7 @@ typedef struct {
 typedef struct {
   Pager *pager;
   uint32_t num_rows;
-
+  Schema schema;
 } Table;
 
 typedef struct {
@@ -80,6 +97,16 @@ typedef struct {
   bool end_of_table; // indicates a positoin one past the last element
 } Cursor;
 
+static Schema default_schema(void) {
+  Schema s = {0};
+  s.num_columns = 3;
+  s.columns[0] = (Column){.name = "id", .offset = 0, .size = 4};
+  s.columns[1] = (Column){.name = "username", .offset = 4, .size = 33};
+  s.columns[2] = (Column){.name = "email", .offset = 37, .size = 256};
+  s.row_size = 4 + 33 + 256;
+  s.rows_per_page = PAGE_SIZE / s.row_size;
+  return s;
+}
 
 void print_row(Row *row) {
   printf("(%u, %s, %s)\n", row->id, row->username, row->email);
