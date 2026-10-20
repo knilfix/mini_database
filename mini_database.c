@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -202,6 +203,8 @@ Table *db_open(const char *filename) {
   uint32_t num_rows = pager->file_length / ROW_SIZE;
 
   Table *table = malloc(sizeof(Table));
+  table->schema = default_schema();
+  assert(table->schema.row_size == ROW_SIZE);
   table->pager = pager;
   table->num_rows = num_rows;
 
