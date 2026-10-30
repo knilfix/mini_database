@@ -5,21 +5,19 @@ fails=0
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# check NAME EXPECTED DBFILE  < input
-# Runs the db with DBFILE as argv[1] and stdin as input; compares output to EXPECTED.
-check() {
-    name=$1
-    expected=$2
-    dbfile=$3
-    actual=$("$BIN" "$dbfile" 2>&1)
-    if [ "$actual" = "$expected" ]; then
-        echo "PASS  $name"
+compare() { # NAME EXPECTED ACTUAL
+    if [ "$3" = "$2" ]; then
+        echo "PASS  $1"
     else
-        echo "FAIL  $name"
-        printf -- '--- expected ---\n%s\n--- actual ---\n%s\n----------------\n' \
-            "$expected" "$actual"
+        echo "FAIL  $1"
+        printf -- '--- expected ---\n%s\n--- actual ---\n%s\n----------------\n' "$2" "$3"
         fails=$((fails + 1))
     fi
+}
+
+# check NAME EXPECTED DBFILE  < input
+check() {
+    compare "$1" "$2" "$("$BIN" "$3" 2>&1)"
 }
 
 repeat_char() {
@@ -27,99 +25,82 @@ repeat_char() {
 }
 
 # ---- 1. insert then select ----
-DB="$TMPDIR/insert_select.db"
 check "insert then select" \
 "db > Executed.
 db > (1, user1, person1@example.com)
 Executed.
-db > " "$DB" <<'EOF'
+db > " "$TMPDIR/basic.db" <<'EOF'
 insert 1 user1 person1@example.com
 select
 .exit
 EOF
 
-# ---- 2. table full ----
-DB="$TMPDIR/table_full.db"
-out=$( { seq 1 1401 | awk '{ print "insert " $1 " user" $1 " p" $1 "@x.com" }'
-         echo .exit; } | "$BIN" "$DB" 2>&1 )
-last=$(printf '%s\n' "$out" | tail -n 2 | head -n 1)
-if [ "$last" = "db > Error: Table full." ]; then
-    echo "PASS  table full"
-else
-    echo "FAIL  table full"; printf 'got: %s\n' "$last"; fails=$((fails + 1))
-fi
-
-# ---- 3. max-length strings ----
+# ---- 2. max-length strings ----
 U32=$(repeat_char a 32)
 E255=$(repeat_char b 255)
-DB="$TMPDIR/max_length.db"
 check "max-length strings" \
 "db > Executed.
 db > (1, $U32, $E255)
 Executed.
-db > " "$DB" <<EOF
+db > " "$TMPDIR/max_length.db" <<EOF
 insert 1 $U32 $E255
 select
 .exit
 EOF
 
-# ---- 4. strings too long ----
+# ---- 3. strings too long ----
 U33=$(repeat_char a 33)
 E256=$(repeat_char b 256)
-DB="$TMPDIR/too_long.db"
 check "strings too long" \
 "db > String is too long.
 db > Executed.
-db > " "$DB" <<EOF
+db > " "$TMPDIR/too_long.db" <<EOF
 insert 1 $U33 $E256
 select
 .exit
 EOF
 
-# ---- 5. negative id ----
-DB="$TMPDIR/negative_id.db"
+# ---- 4. negative id ----
 check "negative id" \
 "db > ID must be positive.
 db > Executed.
-db > " "$DB" <<'EOF'
+db > " "$TMPDIR/negative.db" <<'EOF'
 insert -1 cstack foo@bar.com
 select
 .exit
 EOF
 
-# ---- 6. persistence: insert, exit, reopen, select ----
-DB="$TMPDIR/persistence.db"
-rm -f "$DB"
-
-check "persistence: insert" \
+# ---- 5. duplicate key ----
+check "duplicate key" \
 "db > Executed.
-db > " "$DB" <<'EOF'
-insert 1 user1 person1@example.com
-.exit
-EOF
-
-check "persistence: select after restart" \
-"db > (1, user1, person1@example.com)
+db > Error: Duplicate key.
+db > (1, a, a@x.com)
 Executed.
-db > " "$DB" <<'EOF'
+db > " "$TMPDIR/dup.db" <<'EOF'
+insert 1 a a@x.com
+insert 1 b b@x.com
 select
 .exit
 EOF
 
-# ---- 7. persistence: multiple rows survive restart ----
-DB="$TMPDIR/persistence_multi.db"
-rm -f "$DB"
-
-check "persistence: insert two rows" \
-"db > Executed.
-db > Executed.
-db > " "$DB" <<'EOF'
-insert 1 alice a@x.com
-insert 2 bob b@x.com
+# ---- 6. syntax error / unrecognized keyword ----
+check "syntax and keyword errors" \
+"db > Syntax error. Could not parse statement.
+db > Unrecognized keyword at start of 'foo'.
+db > " "$TMPDIR/errors.db" <<'EOF'
+insert 1 onlyname
+foo
 .exit
 EOF
 
-check "persistence: both rows after restart" \
+# ---- 7. persistence: rows survive restart ----
+DB="$TMPDIR/persist.db"
+"$BIN" "$DB" >/dev/null 2>&1 <<'EOF'
+insert 2 bob b@x.com
+insert 1 alice a@x.com
+.exit
+EOF
+check "persistence after restart" \
 "db > (1, alice, a@x.com)
 (2, bob, b@x.com)
 Executed.
@@ -127,6 +108,49 @@ db > " "$DB" <<'EOF'
 select
 .exit
 EOF
+
+# ---- 8. first leaf split: .btree shape ----
+IN="$TMPDIR/split.in"
+{ seq 1 14 | awk '{ print "insert " $1 " user" $1 " p" $1 "@x.com" }'
+  echo .btree; echo .exit; } > "$IN"
+expected=$(awk 'BEGIN {
+    for (i = 1; i <= 14; i++) print "db > Executed."
+    print "db > Tree:"
+    print "- internal (size 1)"
+    print "  - leaf (size 7)"
+    for (i = 1; i <= 7; i++) print "    - " i
+    print "  - key 7"
+    print "  - leaf (size 7)"
+    for (i = 8; i <= 14; i++) print "    - " i
+    printf "db > "
+}')
+check "leaf split btree shape" "$expected" "$TMPDIR/split.db" < "$IN"
+
+# ---- 9. persistence of a split tree ----
+expected=$(awk 'BEGIN {
+    for (i = 1; i <= 14; i++)
+        printf "%s(%d, user%d, p%d@x.com)\n", (i == 1 ? "db > " : ""), i, i, i
+    print "Executed."
+    printf "db > "
+}')
+check "split tree survives restart" "$expected" "$TMPDIR/split.db" <<'EOF'
+select
+.exit
+EOF
+
+# ---- 10. many out-of-order inserts come back sorted (internal splits) ----
+# i*37 mod 211 is a permutation of 1..210 because 211 is prime
+IN="$TMPDIR/many.in"
+{ seq 1 210 | awk '{ id = ($1 * 37) % 211; print "insert " id " user" id " p" id "@x.com" }'
+  echo select; echo .exit; } > "$IN"
+expected=$(awk 'BEGIN {
+    for (i = 1; i <= 210; i++) print "db > Executed."
+    for (i = 1; i <= 210; i++)
+        printf "%s(%d, user%d, p%d@x.com)\n", (i == 1 ? "db > " : ""), i, i, i
+    print "Executed."
+    printf "db > "
+}')
+check "210 shuffled inserts select sorted" "$expected" "$TMPDIR/many.db" < "$IN"
 
 # ---- summary ----
 echo
