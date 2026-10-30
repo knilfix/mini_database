@@ -43,7 +43,7 @@ typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
 #define INT_COLUMN_SIZE 4u
 /* Keeps at least 4 rows per page now, and room for several B-tree cells later
  */
-#define MAX_ROW_SIZE 1024u
+#define MAX_ROW_SIZE 512u
 
 #define DB_MAGIC                                                               \
   0x4D494E49u         // "MINI": a file that doesn't start with this isn't ours
@@ -71,6 +71,25 @@ typedef struct {
 } Header;
 
 _Static_assert(sizeof(Header) <= PAGE_SIZE, "Header must fit in one page");
+
+// Custom Callocs and Malloc with error handling
+static void *xmalloc(size_t size) {
+  void *p = malloc(size);
+  if (p == NULL) {
+    printf("Out of memory\n");
+    exit(EXIT_FAILURE);
+  }
+  return p;
+}
+
+static void *xcalloc(size_t count, size_t size) {
+  void *p = calloc(count, size);
+  if (p == NULL) {
+    printf("Out of memory\n");
+    exit(EXIT_FAILURE);
+  }
+  return p;
+}
 
 /* In-memory view of the schema */
 typedef struct {
@@ -148,7 +167,7 @@ static bool schema_add_column(Schema *s, const char *name, ColumnType type,
     set_err(err, errlen, "invalid type/size for column '%s'", name);
     return false;
   }
-  if (s->row_size + size > MAX_ROW_SIZE) {
+  if (size > MAX_ROW_SIZE || s->row_size + size > MAX_ROW_SIZE) {
     snprintf(err, errlen, "row too large (max %u bytes)", MAX_ROW_SIZE);
     return false;
   }
@@ -331,7 +350,7 @@ void *get_page(Pager *pager, uint32_t page_num) {
 
   if (pager->pages[page_num] == NULL) {
     // Cache miss. Allocate zeroed memory and load from file
-    void *page = calloc(PAGE_SIZE, 1);
+    void *page = xcalloc(PAGE_SIZE, 1);
     uint32_t num_pages = pager->file_length / PAGE_SIZE;
 
     // we might save a partial page at the end of the file
@@ -365,7 +384,7 @@ Pager *pager_open(const char *filename) {
 
   off_t file_length = lseek(fd, 0, SEEK_END);
 
-  Pager *pager = malloc(sizeof(Pager));
+  Pager *pager = xmalloc(sizeof(Pager));
   pager->file_descriptor = fd;
   pager->file_length = file_length;
 
@@ -401,7 +420,7 @@ void pager_flush(Pager *pager, uint32_t page_num, uint32_t size) {
 /* ---------- Cursor ---------- */
 
 Cursor *table_start(Table *table) {
-  Cursor *cursor = malloc(sizeof(Cursor));
+  Cursor *cursor = xmalloc(sizeof(Cursor));
   cursor->table = table;
   cursor->row_num = 0;
   cursor->end_of_table = (table->num_rows == 0);
@@ -410,7 +429,7 @@ Cursor *table_start(Table *table) {
 }
 
 Cursor *table_end(Table *table) {
-  Cursor *cursor = malloc(sizeof(Cursor));
+  Cursor *cursor = xmalloc(sizeof(Cursor));
 
   cursor->table = table;
   cursor->row_num = table->num_rows;
@@ -460,7 +479,7 @@ static void write_header(Table *table) {
 Table *db_open(const char *filename, const Schema *requested) {
   Pager *pager = pager_open(filename);
 
-  Table *table = malloc(sizeof(Table));
+  Table *table = xmalloc(sizeof(Table));
   table->pager = pager;
 
   if (pager->file_length == 0) {
@@ -562,11 +581,8 @@ void db_close(Table *table) {
 /* ---------- Input ---------- */
 
 InputBuffer *new_input_buffer(void) {
-  InputBuffer *input_buffer = (InputBuffer *)malloc(sizeof(InputBuffer));
-  if (input_buffer == NULL) {
-    printf("Out of memory\n");
-    exit(EXIT_FAILURE);
-  }
+  InputBuffer *input_buffer = xmalloc(sizeof(InputBuffer));
+
   input_buffer->buffer = NULL;
   input_buffer->buffer_length = 0;
   input_buffer->input_length = 0;
@@ -576,12 +592,15 @@ InputBuffer *new_input_buffer(void) {
 
 void print_prompt(void) { printf("db > "); }
 
-void read_input(InputBuffer *input_buffer) {
+bool read_input(InputBuffer *input_buffer) {
   ssize_t bytes_read =
       getline(&(input_buffer->buffer), &(input_buffer->buffer_length), stdin);
 
-  if (bytes_read <= 0) {
-    printf("Error reading input\n");
+  if (bytes_read == -1) {
+    if (feof(stdin)) {
+      return false; // clean EOF: caller shuts down normally
+    }
+    printf("Error reading input: %d\n", errno);
     exit(EXIT_FAILURE);
   }
 
@@ -589,8 +608,10 @@ void read_input(InputBuffer *input_buffer) {
     // Ignore trailing newline
     input_buffer->input_length = bytes_read - 1;
     input_buffer->buffer[bytes_read - 1] = 0;
+    return true;
   } else {
     input_buffer->input_length = bytes_read;
+    return true;
   }
 }
 
@@ -661,7 +682,8 @@ PrepareResult prepare_insert(InputBuffer *input_buffer, Statement *statement,
 PrepareResult prepare_statement(InputBuffer *input_buffer, Statement *statement,
                                 const Schema *s) {
   // Handle insert
-  if (strncmp(input_buffer->buffer, "insert", 6) == 0) {
+  if (strcmp(input_buffer->buffer, "insert") == 0 ||
+      strncmp(input_buffer->buffer, "insert ", 7) == 0) {
     return prepare_insert(input_buffer, statement, s);
   }
   // Handle Select
@@ -741,7 +763,15 @@ int main(int argc, char *argv[]) {
   InputBuffer *input_buffer = new_input_buffer();
   while (true) {
     print_prompt();
-    read_input(input_buffer);
+
+    if (!read_input(input_buffer)) {
+      if (isatty(STDIN_FILENO)) {
+        printf("\n"); // so the shell prompt doesn't land on the "db > " line
+      }
+      close_input_buffer(input_buffer);
+      db_close(table);
+      exit(EXIT_SUCCESS);
+    }
 
     /* Handle meta commands */
     if (input_buffer->buffer[0] == '.') {
@@ -760,7 +790,7 @@ int main(int argc, char *argv[]) {
     case PREPARE_SUCCESS:
       break;
     case PREPARE_NEGATIVE_ID:
-      printf("ID must be positive.\n");
+      printf("ID must be non-negative.\n");
       continue;
     case PREPARE_STRING_TOO_LONG:
       printf("String is too long.\n");
