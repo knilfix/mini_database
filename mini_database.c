@@ -49,6 +49,13 @@ typedef enum { STATEMENT_INSERT, STATEMENT_SELECT } StatementType;
   0x4D494E49u         // "MINI": a file that doesn't start with this isn't ours
 #define DB_VERSION 2u // v2: columns carry a type
 
+typedef enum { TOKEN_OK, TOKEN_END, TOKEN_ERROR } TokenStatus;
+
+typedef struct {
+  char *text;  // NUL-terminated, points into the input buffer
+  bool quoted; // true if it was written as "..."
+} Token;
+
 /* ---------- Schema ---------- */
 
 typedef enum { COL_INT = 1, COL_TEXT = 2 } ColumnType;
@@ -122,6 +129,63 @@ typedef struct {
   uint32_t row_num;
   bool end_of_table; // indicates a position one past the last element
 } Cursor;
+
+// Token parser
+static bool is_blank(char c) { return c == ' ' || c == '\t'; }
+
+/* Reads one token starting at *cursor and advances *cursor past it.
+   Edits the buffer in place: escapes shrink the text, so the write pointer
+   never passes the read pointer. */
+static TokenStatus next_token(char **cursor, Token *out) {
+  char *p = *cursor;
+  while (is_blank(*p)) {
+    p++;
+  }
+  if (*p == '\0') {
+    *cursor = p;
+    return TOKEN_END;
+  }
+
+  if (*p == '"') {
+    p++; // opening quote
+    char *w = p;
+    out->text = w;
+    out->quoted = true;
+    while (*p != '"') {
+      if (*p == '\0') {
+        return TOKEN_ERROR; // unterminated quote
+      }
+      if (*p == '\\') {
+        p++;
+        if (*p != '"' && *p != '\\') {
+          return TOKEN_ERROR; // only \" and \\ are escapes
+        }
+      }
+      *w++ = *p++;
+    }
+    p++; // closing quote
+    if (*p != '\0' && !is_blank(*p)) {
+      return TOKEN_ERROR; // "abc"def
+    }
+    *w = '\0'; // w < p here, so this never clobbers the delimiter
+    *cursor = p;
+    return TOKEN_OK;
+  }
+
+  out->text = p;
+  out->quoted = false;
+  while (*p != '\0' && !is_blank(*p)) {
+    if (*p == '"') {
+      return TOKEN_ERROR; // abc"def
+    }
+    p++;
+  }
+  if (*p != '\0') {
+    *p++ = '\0';
+  }
+  *cursor = p;
+  return TOKEN_OK;
+}
 
 static void set_err(char *err, size_t len, const char *fmt, const char *arg) {
   snprintf(err, len, fmt, arg);
@@ -642,20 +706,28 @@ PrepareResult prepare_insert(InputBuffer *input_buffer, Statement *statement,
   statement->type = STATEMENT_INSERT;
   memset(statement->row, 0, sizeof(statement->row)); // no stale bytes on disk
 
-  strtok(input_buffer->buffer, " "); // the "insert" keyword
+  char *cursor = input_buffer->buffer;
+  Token tok;
+
+  // the "insert" keyword
+  if (next_token(&cursor, &tok) != TOKEN_OK) {
+    return PREPARE_SYNTAX_ERROR;
+  }
 
   for (uint32_t i = 0; i < s->num_columns; i++) {
     const Column *c = &s->columns[i];
-    char *token = strtok(NULL, " ");
-    if (token == NULL) {
+    if (next_token(&cursor, &tok) != TOKEN_OK) {
       return PREPARE_SYNTAX_ERROR;
     }
 
     if (c->type == COL_INT) {
+      if (tok.quoted) {
+        return PREPARE_SYNTAX_ERROR; // ints must be bare
+      }
       char *end;
       errno = 0;
-      long v = strtol(token, &end, 10);
-      if (end == token || *end != '\0' || errno == ERANGE || v < INT32_MIN ||
+      long v = strtol(tok.text, &end, 10);
+      if (end == tok.text || *end != '\0' || errno == ERANGE || v < INT32_MIN ||
           v > INT32_MAX) {
         return PREPARE_SYNTAX_ERROR;
       }
@@ -665,16 +737,16 @@ PrepareResult prepare_insert(InputBuffer *input_buffer, Statement *statement,
       int32_t value = (int32_t)v;
       memcpy(statement->row + c->offset, &value, sizeof(value));
     } else {
-      size_t len = strlen(token);
+      size_t len = strlen(tok.text);
       if (len > c->size - 1) {
         return PREPARE_STRING_TOO_LONG;
       }
-      memcpy(statement->row + c->offset, token, len);
+      memcpy(statement->row + c->offset, tok.text, len);
     }
   }
 
-  if (strtok(NULL, " ") != NULL) {
-    return PREPARE_SYNTAX_ERROR; // too many values
+  if (next_token(&cursor, &tok) != TOKEN_END) {
+    return PREPARE_SYNTAX_ERROR; // too many values (or a malformed token)
   }
   return PREPARE_SUCCESS;
 }
@@ -682,8 +754,8 @@ PrepareResult prepare_insert(InputBuffer *input_buffer, Statement *statement,
 PrepareResult prepare_statement(InputBuffer *input_buffer, Statement *statement,
                                 const Schema *s) {
   // Handle insert
-  if (strcmp(input_buffer->buffer, "insert") == 0 ||
-      strncmp(input_buffer->buffer, "insert ", 7) == 0) {
+  if (strncmp(input_buffer->buffer, "insert", 6) == 0 &&
+      (input_buffer->buffer[6] == '\0' || is_blank(input_buffer->buffer[6]))) {
     return prepare_insert(input_buffer, statement, s);
   }
   // Handle Select
