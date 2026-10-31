@@ -54,10 +54,13 @@ dkms.conf
 # debug information files
 *.dwo
 
-# build 
+# build
 /build
 *.db
 
 # IDE
 .vscode
 __pycache__
+
+tests/
+.pytest*
