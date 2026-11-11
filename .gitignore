@@ -61,6 +61,9 @@ dkms.conf
 # IDE
 .vscode
 __pycache__
+.pytest_cache
+.zed
 
+# tests
 tests/
-.pytest*
+docs/
